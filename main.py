@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import logging
 import time
 import re
+import json
 
 from flask import Flask, request, jsonify, Response
 from flask_limiter import Limiter
@@ -23,19 +24,14 @@ class Config:
     CACHE_DURATION = 3600
     LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     DEBUG = os.environ.get('DEBUG', 'False').lower() == 'true'
-
-@dataclass
-class CacheEntry:
-    response: str
-    timestamp: float
-    source_ip: str
+    MAX_SEARCH_RESULTS = 10
 
 class WebAgentAPI:
     def __init__(self):
         self.app = Flask(__name__)
         self.setup_app()
-        self.cache: Dict[str, CacheEntry] = {}
         self.setup_logging()
+        self.initialize_tools()
         self.initialize_agent()
 
     def setup_app(self) -> None:
@@ -55,17 +51,23 @@ class WebAgentAPI:
         )
         self.logger = logging.getLogger(__name__)
 
+    def initialize_tools(self) -> None:
+        """Initialize search tool separately."""
+        self.search_tool = DuckDuckGo()
+
     def initialize_agent(self) -> None:
         try:
             self.web_agent = Agent(
                 name="Enhanced Web Research Agent",
-                model=Gemini(id="gemini-1.5-flash"),
-                tools=[DuckDuckGo()],
+                model=Gemini(id="gemini-2.0-flash-exp"),
+                tools=[self.search_tool],
                 instructions=[
-                    "Provide comprehensive and accurate information",
-                    "Always cite sources with URLs when available",
-                    "Format responses in clear, structured markdown",
-                    "Include relevant dates and context",
+                    "You are a real-time web research assistant.",
+                    "Analyze and synthesize information from multiple sources.",
+                    "Always cite sources with URLs and dates.",
+                    "Present information in clear, structured markdown.",
+                    "Focus on recent and reliable sources.",
+                    "Highlight any conflicting information from different sources.",
                 ],
                 show_tool_calls=True,
                 markdown=True
@@ -75,57 +77,74 @@ class WebAgentAPI:
             self.logger.error(f"Failed to initialize agent: {str(e)}")
             raise
 
-    def sanitize_input(self, text: str) -> str:
-        text = re.sub(r'[^\w\s\-.,?!]', '', text)
-        return text.strip()
+    def format_search_context(self, search_results: str, query: str) -> str:
+        """Format search results into a context string for the agent."""
+        try:
+            results = json.loads(search_results)
+            
+            context = f"Based on recent search results for '{query}', here's what I found:\n\n"
+            
+            # Add each search result to the context
+            for result in results:
+                if result.get('body') and result.get('title'):
+                    context += f"Source: {result.get('title')}\n"
+                    if result.get('date'):
+                        context += f"Date: {result.get('date')}\n"
+                    context += f"URL: {result.get('link', 'No URL available')}\n"
+                    context += f"Content: {result.get('body')}\n\n"
+            
+            context += "\nPlease analyze these sources and provide a comprehensive summary that:\n"
+            context += "1. Focuses on the most recent information\n"
+            context += "2. Includes specific dates and details\n"
+            context += "3. Cites sources for key claims\n"
+            context += "4. Notes any contradictions between sources\n"
+            
+            return context
+            
+        except json.JSONDecodeError:
+            self.logger.error("Failed to parse search results")
+            return f"Please analyze the following query and provide recent information: {query}"
 
-    def validate_question(self, question: str) -> tuple[bool, Optional[str]]:
-        if not question:
-            return False, "Question cannot be empty"
-        if len(question) < Config.MIN_QUESTION_LENGTH:
-            return False, f"Question must be at least {Config.MIN_QUESTION_LENGTH} characters"
-        if len(question) > Config.MAX_QUESTION_LENGTH:
-            return False, f"Question cannot exceed {Config.MAX_QUESTION_LENGTH} characters"
-        return True, None
+    async def get_response_with_search(self, question: str) -> str:
+        """Get response using explicit search and processing."""
+        try:
+            # First, perform the search
+            self.logger.info(f"Searching for: {question}")
+            search_results = self.search_tool.duckduckgo_search(
+                query=question,
+                max_results=Config.MAX_SEARCH_RESULTS
+            )
+
+            if not search_results:
+                return "No search results found for your query."
+
+            # Format search results into context
+            context = self.format_search_context(search_results, question)
+
+            # Get response from agent with search context
+            response = self.web_agent.run(
+                message=context,
+                stream=False
+            )
+
+            return self.extract_response_content(response)
+
+        except Exception as e:
+            self.logger.error(f"Error in search and response: {str(e)}")
+            raise
 
     def extract_response_content(self, response: Any) -> str:
-        """
-        Extract the content from RunResponse object or return string representation.
-        """
+        """Extract content from response object."""
         try:
-            # If response is RunResponse object, get its content
             if hasattr(response, 'content'):
                 return str(response.content)
-            # If response is already a string
             elif isinstance(response, str):
                 return response
-            # If response has a __str__ method
             else:
                 return str(response)
         except Exception as e:
             self.logger.error(f"Error extracting response content: {str(e)}")
             return "Error processing response"
-
-    def format_response(self, response: Any) -> Dict[str, Any]:
-        """Format the response for JSON serialization"""
-        return {
-            "response": self.extract_response_content(response),
-            "timestamp": datetime.utcnow().isoformat(),
-            "metadata": {
-                "processed_at": time.time(),
-                "source": "gemini-1.5-flash",
-                "cached": False
-            }
-        }
-
-    def create_error_response(self, message: str, status_code: int = 400) -> Response:
-        return jsonify({
-            "error": {
-                "message": message,
-                "timestamp": datetime.utcnow().isoformat(),
-                "status": status_code
-            }
-        }), status_code
 
     def setup_routes(self) -> None:
         @self.app.route('/query', methods=['POST'])
@@ -133,38 +152,40 @@ class WebAgentAPI:
         def query() -> Response:
             try:
                 if not request.is_json:
-                    return self.create_error_response("Request must be JSON", 415)
+                    return jsonify({"error": "Request must be JSON"}), 415
 
                 data = request.get_json()
-                if not isinstance(data, dict):
-                    return self.create_error_response("Invalid request format", 400)
-
                 question = data.get("question", "").strip()
-                question = self.sanitize_input(question)
-                is_valid, error_message = self.validate_question(question)
-                
-                if not is_valid:
-                    return self.create_error_response(error_message, 400)
 
-                self.logger.info(f"Processing question: {question[:50]}...")
+                if not question:
+                    return jsonify({"error": "Question is required"}), 400
+
+                # Perform search and get response
+                search_results = self.search_tool.duckduckgo_search(
+                    query=question,
+                    max_results=Config.MAX_SEARCH_RESULTS
+                )
                 
-                # Get response from agent
-                try:
-                    response = self.web_agent.run(message=question, stream=False)
-                    if not response:
-                        return self.create_error_response("No response generated", 500)
-                    
-                    # Format and return response
-                    formatted_response = self.format_response(response)
-                    return jsonify(formatted_response)
+                if not search_results:
+                    return jsonify({"error": "No search results found"}), 404
+
+                # Format context and get response
+                context = self.format_search_context(search_results, question)
+                response = self.web_agent.run(message=context, stream=False)
                 
-                except Exception as e:
-                    self.logger.error(f"Error getting response from agent: {str(e)}")
-                    return self.create_error_response("Error processing request", 500)
+                return jsonify({
+                    "response": self.extract_response_content(response),
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "metadata": {
+                        "processed_at": time.time(),
+                        "source": "gemini-2.o-flash-exp",
+                        "search_results_count": len(json.loads(search_results))
+                    }
+                })
 
             except Exception as e:
                 self.logger.error(f"Error processing request: {str(e)}", exc_info=True)
-                return self.create_error_response("Internal server error", 500)
+                return jsonify({"error": str(e)}), 500
 
         @self.app.route('/health', methods=['GET'])
         def health_check() -> Response:
