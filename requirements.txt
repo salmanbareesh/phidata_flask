@@ -1,6 +1,7 @@
 # Core dependencies
 Flask==3.0.2
 phidata
+duckduckgo-search
 google-generativeai
 openai
 # Flask extensions
