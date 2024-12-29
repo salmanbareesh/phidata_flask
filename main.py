@@ -17,10 +17,27 @@ web_agent = Agent(
 
 @app.route('/query', methods=['POST'])
 def query():
-    data = request.json
-    question = data.get("question", "What's happening?")
-    response = web_agent.print_response(question, stream=False)
-    return jsonify({"response": response})
+    try:
+        # Parse the incoming JSON data
+        data = request.json
+        question = data.get("question", "What's happening?")
+        print(f"Received question: {question}")  # Debugging line
+        
+        # Call the agent's method to get the response
+        response = web_agent.print_response(question, stream=False)
+        print(f"Generated response: {response}")  # Debugging line
+        
+        if response:
+            # Ensure the response is returned as JSON
+            return jsonify({"response": response})
+        else:
+            # Return a fallback message if no response is generated
+            return jsonify({"response": "No response generated"})
+    
+    except Exception as e:
+        # Catch and log any errors
+        print(f"Error processing request: {e}")
+        return jsonify({"response": "An error occurred"})
 
 if __name__ == '__main__':
     # Bind to all IP addresses and use the port specified by the environment (default to 5000)
