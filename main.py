@@ -1,8 +1,4 @@
-import inspect
-
-if not hasattr(inspect, "getargspec"):
-    inspect.getargspec = inspect.getfullargspec
-
+import os
 from flask import Flask, request, jsonify
 from phi.agent import Agent
 from phi.model.google import Gemini
@@ -27,4 +23,5 @@ def query():
     return jsonify({"response": response})
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    # Bind to all IP addresses and use the port specified by the environment (default to 5000)
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)), debug=True)
