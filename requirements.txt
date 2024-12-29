@@ -2,7 +2,7 @@
 Flask==3.0.2
 phidata
 google-generativeai
-
+openai
 # Flask extensions
 Flask-Limiter==3.5.1
 Flask-CORS==4.0.0
