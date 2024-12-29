@@ -1,6 +1,6 @@
 # Core dependencies
 Flask==3.0.2
-phi-agent==0.2.0
+phidata
 google-generativeai==0.3.2
 
 # Flask extensions
