@@ -1,3 +1,4 @@
 flask
 phidata
 duckduckgo-search
+google-generativeai
