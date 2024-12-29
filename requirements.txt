@@ -2,3 +2,4 @@ flask
 phidata
 duckduckgo-search
 google-generativeai
+packaging
