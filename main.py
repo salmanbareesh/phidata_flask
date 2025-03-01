@@ -67,7 +67,7 @@ class WebAgentAPI:
                     "Always cite sources with URLs and dates.",
                     "Present information in clear, structured markdown.",
                     "Focus on recent and reliable sources.",
-                    "Highlight any conflicting information from different sources.",
+                    "Include source url.",
                 ],
                 show_tool_calls=True,
                 markdown=True
