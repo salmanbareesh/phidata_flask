@@ -14,6 +14,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from phi.agent import Agent
 from phi.model.google import Gemini
 from duckduckgo_search import DDGS  # Importing the DDGS class for search
+from langchain.tools import Tool
 
 class Config:
     MAX_QUESTION_LENGTH = 500
@@ -33,16 +34,16 @@ class CustomDuckDuckGo:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
 
-    def duckduckgo_search(self, query: str, max_results: int = 10):
+    def search(self, query: str, max_results: int = 10):
         """Perform DuckDuckGo search with a User-Agent header."""
         try:
             with httpx.Client(headers=self.headers, timeout=10) as client:
                 ddgs = DDGS(client=client)
                 results = list(ddgs.text(query, max_results=max_results))
-                return json.dumps(results, indent=2)
+                return results  # Returns a structured list, not JSON string
         except Exception as e:
             logging.error(f"Error in DuckDuckGo search: {str(e)}")
-            return json.dumps([])
+            return []
 
 class WebAgentAPI:
     def __init__(self):
@@ -70,15 +71,19 @@ class WebAgentAPI:
         self.logger = logging.getLogger(__name__)
 
     def initialize_tools(self) -> None:
-        """Initialize DuckDuckGo search tool with a custom User-Agent."""
-        self.search_tool = CustomDuckDuckGo()
+        """Initialize DuckDuckGo search tool as a valid LangChain Tool."""
+        self.search_tool = Tool(
+            name="DuckDuckGo Search",
+            func=CustomDuckDuckGo().search,
+            description="Search for real-time information using DuckDuckGo."
+        )
 
     def initialize_agent(self) -> None:
         try:
             self.web_agent = Agent(
                 name="Enhanced Web Research Agent",
                 model=Gemini(id="gemini-2.0-flash-exp"),
-                tools=[self.search_tool],
+                tools=[self.search_tool],  # Must be a valid Tool instance
                 instructions=[
                     "You are a real-time web research assistant.",
                     "Analyze and synthesize information from multiple sources.",
@@ -95,36 +100,28 @@ class WebAgentAPI:
             self.logger.error(f"Failed to initialize agent: {str(e)}")
             raise
 
-    def format_search_context(self, search_results: str, query: str) -> str:
+    def format_search_context(self, search_results: list, query: str) -> str:
         """Format search results into a context string for the agent."""
-        try:
-            results = json.loads(search_results)
-            context = f"Based on recent search results for '{query}', here's what I found:\n\n"
+        if not search_results:
+            return f"No search results found for query: {query}"
 
-            for result in results:
-                if result.get('body') and result.get('title'):
-                    context += f"Source: {result.get('title')}\n"
-                    if result.get('date'):
-                        context += f"Date: {result.get('date')}\n"
-                    context += f"URL: {result.get('link', 'No URL available')}\n"
-                    context += f"Content: {result.get('body')}\n\n"
+        context = f"Based on recent search results for '{query}', here's what I found:\n\n"
+        for result in search_results:
+            title = result.get('title', 'No Title')
+            link = result.get('href', 'No URL')
+            snippet = result.get('body', 'No Content')
 
-            context += "\nPlease analyze these sources and provide a comprehensive summary that:\n"
-            context += "1. Focuses on the most recent information\n"
-            context += "2. Includes specific dates and details\n"
-            context += "3. Cites sources for key claims\n"
-            context += "4. Notes any contradictions between sources\n"
+            context += f"**{title}**\n"
+            context += f"🔗 [Link]({link})\n"
+            context += f"📌 {snippet}\n\n"
 
-            return context
-        except json.JSONDecodeError:
-            self.logger.error("Failed to parse search results")
-            return f"Please analyze the following query and provide recent information: {query}"
+        return context
 
     async def get_response_with_search(self, question: str) -> str:
         """Get response using explicit search and processing."""
         try:
             self.logger.info(f"Searching for: {question}")
-            search_results = self.search_tool.duckduckgo_search(
+            search_results = self.search_tool.func(
                 query=question,
                 max_results=Config.MAX_SEARCH_RESULTS
             )
@@ -133,11 +130,7 @@ class WebAgentAPI:
                 return "No search results found for your query."
 
             context = self.format_search_context(search_results, question)
-
-            response = self.web_agent.run(
-                message=context,
-                stream=False
-            )
+            response = self.web_agent.run(message=context, stream=False)
 
             return self.extract_response_content(response)
         except Exception as e:
@@ -146,16 +139,12 @@ class WebAgentAPI:
 
     def extract_response_content(self, response: Any) -> str:
         """Extract content from response object."""
-        try:
-            if hasattr(response, 'content'):
-                return str(response.content)
-            elif isinstance(response, str):
-                return response
-            else:
-                return str(response)
-        except Exception as e:
-            self.logger.error(f"Error extracting response content: {str(e)}")
-            return "Error processing response"
+        if isinstance(response, str):
+            return response
+        elif hasattr(response, 'content'):
+            return str(response.content)
+        else:
+            return str(response)
 
     def setup_routes(self) -> None:
         @self.app.route('/query', methods=['POST'])
@@ -171,7 +160,7 @@ class WebAgentAPI:
                 if not question:
                     return jsonify({"error": "Question is required"}), 400
 
-                search_results = self.search_tool.duckduckgo_search(
+                search_results = self.search_tool.func(
                     query=question,
                     max_results=Config.MAX_SEARCH_RESULTS
                 )
@@ -188,7 +177,7 @@ class WebAgentAPI:
                     "metadata": {
                         "processed_at": time.time(),
                         "source": "gemini-2.0-flash-exp",
-                        "search_results_count": len(json.loads(search_results))
+                        "search_results_count": len(search_results)
                     }
                 })
             except Exception as e:
